@@ -237,6 +237,7 @@ main{max-width:1100px;margin:0 auto;padding:24px 24px 80px;}
     <div class="logo">IRON WEEK</div>
     <div class="header-right">
       <div class="streak-badge">🔥 <span id="streakCount">0</span> j</div>
+      <button class="hdr-btn" id="syncStatus" onclick="openTokenModal()">☁️ Sync</button>
       <button class="hdr-btn" id="progToggle" onclick="toggleProgView()">📈 Progression</button>
     </div>
   </div>
@@ -324,6 +325,26 @@ main{max-width:1100px;margin:0 auto;padding:24px 24px 80px;}
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- TOKEN MODAL -->
+<div class="modal-backdrop" id="tokenModal" onclick="if(event.target===this)closeTokenModal()">
+  <div class="modal" style="max-width:360px">
+    <div class="modal-title">☁️ SYNC GITHUB</div>
+    <div class="modal-subtitle">Tes données sont sauvegardées sur ton repo GitHub et accessibles partout.</div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:14px;margin-bottom:16px;font-size:0.78rem;color:var(--muted);line-height:1.6">
+      <strong style="color:var(--text)">Comment créer ton token :</strong><br>
+      github.com → Photo profil → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → coche <strong style="color:var(--purple)">repo</strong> → Generate
+    </div>
+    <div class="modal-field" style="margin-bottom:16px">
+      <label>Token GitHub (ghp_...)</label>
+      <input type="password" id="tokenInput" placeholder="ghp_xxxxxxxxxxxx" style="font-size:0.9rem;padding:12px;letter-spacing:1px">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeTokenModal()">Annuler</button>
+      <button class="btn-confirm" onclick="saveToken()">CONNECTER ✓</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
@@ -597,10 +618,105 @@ const TYPE_COLORS={strength:'#ff4d1c',volume:'#ff8c42',cardio:'#22c55e',rest:'#6
 const TYPE_LABELS={strength:'Force',volume:'Volume',cardio:'Cardio',rest:'Repos'};
 
 /* ══════════════════════════════════════════
+   GITHUB SYNC CONFIG
+══════════════════════════════════════════ */
+const GH_REPO  = 'ilyessocpartner/ironweek';
+const GH_FILE  = 'data.json';
+const GH_API   = `https://api.github.com/repos/${GH_REPO}/contents/${GH_FILE}`;
+
+function getToken(){ return localStorage.getItem('gh_token') || ''; }
+function setToken(t){ localStorage.setItem('gh_token',t); }
+
+/* ══════════════════════════════════════════
    STATE
 ══════════════════════════════════════════ */
 let state = JSON.parse(localStorage.getItem('ironweek_v3') || '{"sessions":{}}');
-function saveState(){localStorage.setItem('ironweek_v3',JSON.stringify(state));}
+let ghFileSha = null; // needed for GitHub update
+let syncStatus = 'idle'; // idle | syncing | ok | error
+
+function saveState(){
+  localStorage.setItem('ironweek_v3', JSON.stringify(state));
+  pushToGitHub();
+}
+
+async function pushToGitHub(){
+  const token = getToken();
+  if(!token) return;
+  syncStatus = 'syncing';
+  updateSyncUI();
+  try {
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(state))));
+    const body = { message:'ironweek sync', content };
+    if(ghFileSha) body.sha = ghFileSha;
+    const res = await fetch(GH_API, {
+      method:'PUT',
+      headers:{ Authorization:`token ${token}`, 'Content-Type':'application/json' },
+      body: JSON.stringify(body)
+    });
+    if(!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    ghFileSha = data.content?.sha;
+    syncStatus = 'ok';
+  } catch(e) {
+    syncStatus = 'error';
+  }
+  updateSyncUI();
+}
+
+async function pullFromGitHub(){
+  const token = getToken();
+  if(!token) return false;
+  syncStatus = 'syncing';
+  updateSyncUI();
+  try {
+    const res = await fetch(GH_API+'?t='+Date.now(), {
+      headers:{ Authorization:`token ${token}` }
+    });
+    if(res.status === 404){ syncStatus='ok'; updateSyncUI(); return false; }
+    if(!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    ghFileSha = data.sha;
+    const decoded = decodeURIComponent(escape(atob(data.content.replace(/\n/g,''))));
+    const remote = JSON.parse(decoded);
+    // Merge: remote wins, keep local sessions not in remote
+    state.sessions = Object.assign({}, state.sessions, remote.sessions);
+    localStorage.setItem('ironweek_v3', JSON.stringify(state));
+    syncStatus = 'ok';
+    updateSyncUI();
+    return true;
+  } catch(e) {
+    syncStatus = 'error';
+    updateSyncUI();
+    return false;
+  }
+}
+
+function updateSyncUI(){
+  const el = document.getElementById('syncStatus');
+  if(!el) return;
+  const icons = { idle:'☁️', syncing:'⏳', ok:'✅', error:'❌' };
+  const labels = { idle:'Sync', syncing:'Sync...', ok:'Sauvegardé', error:'Erreur sync' };
+  el.textContent = icons[syncStatus] + ' ' + labels[syncStatus];
+  el.style.color = syncStatus==='error' ? '#ef4444' : syncStatus==='ok' ? 'var(--green)' : 'var(--muted)';
+}
+
+/* ── TOKEN MODAL ── */
+function openTokenModal(){
+  document.getElementById('tokenModal').classList.add('open');
+  const cur = getToken();
+  document.getElementById('tokenInput').value = cur ? cur.slice(0,8)+'...' : '';
+}
+function closeTokenModal(){ document.getElementById('tokenModal').classList.remove('open'); }
+async function saveToken(){
+  const t = document.getElementById('tokenInput').value.trim();
+  if(!t || t.includes('...')) { closeTokenModal(); return; }
+  setToken(t);
+  closeTokenModal();
+  showToast('🔑 Token sauvegardé, synchronisation...');
+  const ok = await pullFromGitHub();
+  if(ok){ showToast('✅ Données récupérées depuis GitHub !'); buildNav(); if(currentDayId) renderSession(currentDayId); }
+  else { pushToGitHub(); }
+}
 function todayDate(){return new Date().toISOString().slice(0,10);}
 function getSession(dayId,date){
   const d=date||todayDate(), k=d+'_'+dayId;
@@ -1317,6 +1433,13 @@ function getTodayId(){
 buildNav();
 document.getElementById('streakCount').textContent=getStreak();
 showDay(getTodayId());
+
+// Auto-sync on load if token exists
+if(getToken()){
+  pullFromGitHub().then(ok=>{
+    if(ok){ buildNav(); document.getElementById('streakCount').textContent=getStreak(); renderSession(currentDayId); }
+  });
+}
 </script>
 </body>
 </html>
